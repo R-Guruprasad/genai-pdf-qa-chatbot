@@ -5,75 +5,181 @@ To design and implement a question-answering chatbot capable of processing and e
 
 ### PROBLEM STATEMENT:
 The goal is to build a chatbot that can accurately extract and provide answers based on the text from a PDF document, allowing users to interact and retrieve specific information from the document without manually reading it.
-
 ### DESIGN STEPS:
 
-#### STEP 1:Install Necessary Libraries
-Before starting the implementation, ensure that all necessary libraries and dependencies are installed. This includes LangChain for processing the text, PyPDF2 (or similar) for reading PDF files, and an LLM like OpenAI for question-answering functionality.Install Necessary Libraries
-
-#### STEP 2:Extract Text from PDF
-Use libraries like PyPDF2 to extract the text from the provided PDF document. The PDF extraction process should handle multiple pages and ensure that the text is clean and usable for further processing.
-
-#### STEP 3:Process Text Using LangChain
-Once the PDF text is extracted, it needs to be processed using LangChain’s tools, such as the TextSplitter and QuestionAnsweringChain, to handle large documents and provide accurate answers based on the content.
-
-#### STEP 4: User Interaction
-Allow the user to input questions and receive responses based on the content extracted from the PDF document. The user will interact with the chatbot by entering questions, and the bot will provide answers based on the document’s content.
-
+#### STEP 1:
+Use LangChain's DocumentLoader to extract text from a PDF document.
+#### STEP 2:
+Convert the text into vector embeddings using a language model, enabling semantic search.
+#### STEP 3:
+Use LangChain's RetrievalQA to connect the vector store with a language model for answering questions.
+#### STEP 4:
+Process user queries, retrieve relevant document sections, and generate responses.
+#### STEP 5:
+Test the chatbot with a variety of queries to assess accuracy and reliability.
 ### PROGRAM:
-```
-Name: R Guruprasad
-Register No: 212222240033
-```
-```
-import PyPDF2
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import QuestionAnsweringChain
-from langchain.llms import OpenAI
+```py
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
+from langchain.vectorstores import DocArrayInMemorySearch
+from langchain.document_loaders import TextLoader
+from langchain.chains import RetrievalQA,  ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+from langchain.chat_models import ChatOpenAI
+from langchain.document_loaders import TextLoader
+from langchain.document_loaders import PyPDFLoader
 
-# Extract PDF text
-def extract_pdf_text(pdf_path):
-    with open(pdf_path, "rb") as file:
-        reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page in range(len(reader.pages)):
-            text += reader.pages[page].extract_text()
-    return text
+def load_db(file, chain_type, k):
+    # load documents
+    loader = PyPDFLoader(file)
+    documents = loader.load()
 
-# Initialize LLM (OpenAI, or other LLMs)
-llm = OpenAI(temperature=0.7)
+    # split documents
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    docs = text_splitter.split_documents(documents)
 
-# Initialize TextSplitter
-splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    # define embedding
+    embeddings = OpenAIEmbeddings()
 
-# Create Q&A Chain
-qa_chain = QuestionAnsweringChain.from_llm(llm)
+    # create vector database from data
+    db = DocArrayInMemorySearch.from_documents(docs, embeddings)
 
-def answer_question(question, chunks):
-    context = " ".join(chunks)
-    return qa_chain.run({"input_document": context, "question": question})
+    # define retriever
+    retriever = db.as_retriever(search_type="similarity", search_kwargs={"k": k})
 
-def main():
-    pdf_path = "document.pdf"  # Provide the path to your PDF file
-    extracted_text = extract_pdf_text(pdf_path)
-    chunks = splitter.split_text(extracted_text)
+    # create a chatbot chain. Memory is managed externally.
+    qa = ConversationalRetrievalChain.from_llm(
+        llm=ChatOpenAI(model_name=llm_name, temperature=0), 
+        chain_type=chain_type, 
+        retriever=retriever, 
+        return_source_documents=True,
+        return_generated_question=True,
+    )
+    return qa
+
+
+import panel as pn
+import param
+
+class cbfs(param.Parameterized):
+    chat_history = param.List([])
+    answer = param.String("")
+    db_query  = param.String("")
+    db_response = param.List([])
     
-    print("PDF-based Question Answering Chatbot")
+    def __init__(self,  **params):
+        super(cbfs, self).__init__( **params)
+        self.panels = []
+        self.loaded_file = "docs/cs229_lectures/MachineLearning-Lecture01.pdf"
+        self.qa = load_db(self.loaded_file,"stuff", 4)
     
-    while True:
-        question = input("Ask a question (or 'quit' to exit): ")
-        if question.lower() == "quit":
-            break
-        answer = answer_question(question, chunks)
-        print(f"Answer: {answer}")
+    def call_load_db(self, count):
+        if count == 0 or file_input.value is None:  # init or no file specified :
+            return pn.pane.Markdown(f"Loaded File: {self.loaded_file}")
+        else:
+            file_input.save("temp.pdf")  # local copy
+            self.loaded_file = file_input.filename
+            button_load.button_style="outline"
+            self.qa = load_db("temp.pdf", "stuff", 4)
+            button_load.button_style="solid"
+        self.clr_history()
+        return pn.pane.Markdown(f"Loaded File: {self.loaded_file}")
 
-if __name__ == "__main__":
-    main()
+    def convchain(self, query):
+        if not query:
+            return pn.WidgetBox(pn.Row('User:', pn.pane.Markdown("", width=600)), scroll=True)
+        result = self.qa({"question": query, "chat_history": self.chat_history})
+        self.chat_history.extend([(query, result["answer"])])
+        self.db_query = result["generated_question"]
+        self.db_response = result["source_documents"]
+        self.answer = result['answer'] 
+        self.panels.extend([
+            pn.Row('User:', pn.pane.Markdown(query, width=600)),
+            pn.Row('ChatBot:', pn.pane.Markdown(self.answer, width=600, style={'background-color': '#F6F6F6'}))
+        ])
+        inp.value = ''  #clears loading indicator when cleared
+        return pn.WidgetBox(*self.panels,scroll=True)
+
+    @param.depends('db_query ', )
+    def get_lquest(self):
+        if not self.db_query :
+            return pn.Column(
+                pn.Row(pn.pane.Markdown(f"Last question to DB:", styles={'background-color': '#F6F6F6'})),
+                pn.Row(pn.pane.Str("no DB accesses so far"))
+            )
+        return pn.Column(
+            pn.Row(pn.pane.Markdown(f"DB query:", styles={'background-color': '#F6F6F6'})),
+            pn.pane.Str(self.db_query )
+        )
+
+    @param.depends('db_response', )
+    def get_sources(self):
+        if not self.db_response:
+            return 
+        rlist=[pn.Row(pn.pane.Markdown(f"Result of DB lookup:", styles={'background-color': '#F6F6F6'}))]
+        for doc in self.db_response:
+            rlist.append(pn.Row(pn.pane.Str(doc)))
+        return pn.WidgetBox(*rlist, width=600, scroll=True)
+
+    @param.depends('convchain', 'clr_history') 
+    def get_chats(self):
+        if not self.chat_history:
+            return pn.WidgetBox(pn.Row(pn.pane.Str("No History Yet")), width=600, scroll=True)
+        rlist=[pn.Row(pn.pane.Markdown(f"Current Chat History variable", styles={'background-color': '#F6F6F6'}))]
+        for exchange in self.chat_history:
+            rlist.append(pn.Row(pn.pane.Str(exchange)))
+        return pn.WidgetBox(*rlist, width=600, scroll=True)
+
+    def clr_history(self,count=0):
+        self.chat_history = []
+        return 
+
+
+cb = cbfs()
+
+file_input = pn.widgets.FileInput(accept='.pdf')
+button_load = pn.widgets.Button(name="Load DB", button_type='primary')
+button_clearhistory = pn.widgets.Button(name="Clear History", button_type='warning')
+button_clearhistory.on_click(cb.clr_history)
+inp = pn.widgets.TextInput( placeholder='Enter text here…')
+
+bound_button_load = pn.bind(cb.call_load_db, button_load.param.clicks)
+conversation = pn.bind(cb.convchain, inp) 
+
+jpg_pane = pn.pane.Image( './img/convchain.jpg')
+
+tab1 = pn.Column(
+    pn.Row(inp),
+    pn.layout.Divider(),
+    pn.panel(conversation,  loading_indicator=True, height=300),
+    pn.layout.Divider(),
+)
+tab2= pn.Column(
+    pn.panel(cb.get_lquest),
+    pn.layout.Divider(),
+    pn.panel(cb.get_sources ),
+)
+tab3= pn.Column(
+    pn.panel(cb.get_chats),
+    pn.layout.Divider(),
+)
+tab4=pn.Column(
+    pn.Row( file_input, button_load, bound_button_load),
+    pn.Row( button_clearhistory, pn.pane.Markdown("Clears chat history. Can use to start a new topic" )),
+    pn.layout.Divider(),
+    pn.Row(jpg_pane.clone(width=400))
+)
+dashboard = pn.Column(
+    pn.Row(pn.pane.Markdown('# ChatWithYourData_Bot')),
+    pn.Tabs(('Conversation', tab1), ('Database', tab2), ('Chat History', tab3),('Configure', tab4))
+)
+dashboard
 ```
-
 ### OUTPUT:
-![image](https://github.com/user-attachments/assets/6043e176-5192-4c20-862b-8651e55a738a)
-
+![image](https://github.com/user-attachments/assets/000e6e05-9924-4ae8-acd3-d4706b303f3d)
+![image](https://github.com/user-attachments/assets/5b2b2dd1-371f-459b-95a7-452d7e632c2a)
+![image](https://github.com/user-attachments/assets/a030d57c-3e18-484e-acd2-8127a6559c57)
+![image](https://github.com/user-attachments/assets/87ae1e0f-ea8b-4303-81fb-340d1389119f)
 
 ### RESULT:
-The chatbot successfully extracts content from the provided PDF document and answers user queries based on the text. The results can vary depending on the complexity and clarity of the document, but the chatbot aims to provide accurate and relevant answers. The system can be further enhanced with more advanced features like document summarization or handling more complex question-answering scenarios.
+Thus, a question-answering chatbot capable of processing and extracting information from a provided PDF document using LangChain was implemented and evaluated for its effectiveness by testing its responses to diverse queries derived from the document's content successfully.
